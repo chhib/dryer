@@ -3,7 +3,8 @@
 Clojure compares every top-level list except `ns`, matching dry4clj. The other
 languages compare the functions and methods crapper scores: bodies, not
 signatures alone, and not callbacks nested inside another function. Rust
-functions inside `mod tests` are test code and are skipped.
+functions inside `mod tests` are test code and are skipped. SQL compares
+the CTEs, final selects, and macros dbtsql reads.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from dryer.astnorm import normalize
 from dryer.clojure_read import is_candidate_form, max_line, normalize as normalize_clj
 from dryer.clojure_read import read_source
 from dryer.model import Entry
-from dryer.shape import fingerprints, node_count
+from dryer.shape import K, fingerprints, node_count
 from dryer.treesitter import child_of_type, descendants, end_line, node_text, parse, start_line
 
 _TS_FUNCTION = {
@@ -194,9 +195,47 @@ def _clojure_entries(source: str, file: str) -> tuple[list[Entry], str | None]:
     return entries, warning
 
 
+def _keywords(node):
+    if isinstance(node, list):
+        return [_keywords(child) for child in node]
+    return K(node)
+
+
+def _sql_entries(source: str, file: str) -> list[Entry]:
+    """Each CTE, final select, and macro dbtsql reads, as keywords.
+
+    An import CTE only renames columns of one ref, so every model repeats it.
+    """
+
+    from dbtsql.shape import tree
+    from dbtsql.units import parse
+
+    parsed = parse(source)
+    entries = []
+    for unit in parsed.units:
+        if unit.kind == "import":
+            continue
+        normalized = _keywords(tree(parsed, unit))
+        if not normalized:
+            continue
+        entries.append(
+            Entry(
+                language="sql",
+                file=file,
+                start_line=unit.start_line,
+                end_line=unit.end_line,
+                nodes=node_count(normalized),
+                fingerprints=fingerprints(normalized),
+            )
+        )
+    return entries
+
+
 def entries_in_source(language: str, source: str, path: str, file: str) -> tuple[list[Entry], str | None]:
     if language == "clojure":
         return _clojure_entries(source, file)
+    if language == "sql":
+        return _sql_entries(source, file), None
     if language not in _PICKERS:
         return [], None
     return _tree_entries(language, source, path, file), None
